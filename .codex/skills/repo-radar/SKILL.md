@@ -1,128 +1,69 @@
 ---
 name: repo-radar
 description: >
-  Analyse and classify a GitHub repository, recording the verdict in
-  PROJECT_EVALUATIONS.md. Use when asked to evaluate, audit, or decide whether
-  to incorporate a GitHub repo.
+  Analyse and classify a GitHub repository using the repo-radar CLI (SQLite +
+  LLM), recording the verdict in PROJECT_EVALUATIONS.md. Use when asked to
+  evaluate, audit, or decide whether to incorporate a GitHub repo.
 ---
 
 # Repo Radar
 
-Analyse the GitHub repository passed as argument and record the evaluation in
+Analyse the GitHub repository passed as argument using the `repo-radar` CLI,
+persisting results in SQLite and recording the evaluation in
 `/opt/references/PROJECT_EVALUATIONS.md`.
 
 ## Inputs
 
 - Repository URL (e.g. `https://github.com/owner/repo`)
-- `PROJECT_EVALUATIONS.md` — existing evaluations file to append or update
 
 ## Steps
 
-### 1. Fetch metadata via GitHub API
-
-Use `curl` or the GitHub MCP to retrieve:
-- Stars, forks, open issues, contributors, releases
-- Primary language and all languages
-- Last push date (to compute activity)
-- Topics, license, archived flag, fork flag
-- Description and clone URL
+### 1. Ensure repo-radar is installed
 
 ```bash
-curl -s "https://api.github.com/repos/<owner>/<repo>" \
-  -H "Authorization: Bearer $GITHUB_TOKEN"
+which repo-radar || pip install -e /opt/references/repo-radar
 ```
 
-### 2. Clone the repository
+If `/opt/references/repo-radar` does not exist:
+```bash
+git clone https://github.com/marciohideaki/repo-radar /opt/references/repo-radar
+pip install -e /opt/references/repo-radar
+```
+
+### 2. Ensure `.env` is configured
+
+Check for `/opt/references/repo-radar/.env`. If missing, copy from `.env.example`
+and set `LLM_PROVIDER` + matching API key for the running agent:
+
+- Codex → `LLM_PROVIDER=openai` + `OPENAI_API_KEY`
+- Claude → `LLM_PROVIDER=claude` + `ANTHROPIC_API_KEY`
+- Gemini → `LLM_PROVIDER=gemini` + `GEMINI_API_KEY`
+- Ollama → `LLM_PROVIDER=ollama`
+
+### 3. Run the analysis
 
 ```bash
-git clone --depth=1 <clone_url> /tmp/radar-<repo-name>
+cd /opt/references/repo-radar
+repo-radar add "<url>"
 ```
 
-If the directory already exists, run `git pull` instead.
+The CLI will:
+- Fetch metadata via GitHub API
+- Clone the repository into `repos/`
+- Compute heuristic scores (doc, code, coherence, maturity)
+- Ask the LLM for the final verdict (classification + rationale)
+- Persist everything in SQLite (`data/radar.db`) with append-only history
 
-### 3. Local heuristic scoring (no API cost)
+### 4. Display result
 
-Inspect the cloned content and score each dimension 0–100:
+```bash
+repo-radar show <repo-name>
+```
 
-#### Documentation score (weight 20%)
-| Signal | Points |
-|--------|--------|
-| README present | +10 |
-| README >500 chars | +5 |
-| README >2k chars | +5 |
-| README >5k chars | +5 |
-| Install/usage instructions | +5 |
-| CHANGELOG present | +10 |
-| docs/ or wiki/ folder | +10 |
-| examples/ or demo/ folder | +10 |
-| LICENSE present | +10 |
-| CONTRIBUTING or CODE_OF_CONDUCT | +10 |
-| .github/ present | +5 |
-| API docs / swagger / openapi | +5 |
+### 5. Export to PROJECT_EVALUATIONS.md
 
-#### Code/structure score (weight 30%)
-| Signal | Points |
-|--------|--------|
-| Test directory (tests/, spec/, __tests__/) | +15 |
-| >5 test files | +5 |
-| CI/CD (GitHub Actions, CircleCI, Travis, GitLab CI) | +15 |
-| Dockerfile | +7 |
-| docker-compose | +3 |
-| Package manifest (package.json, requirements.txt, go.mod…) | +10 |
-| Organised structure (src/, lib/, cmd/) | +10 |
-| Lint/format config | +5 |
-
-#### Coherence score — README ↔ code (weight 20%)
-Base score: 50. For each item mentioned in the README:
-- exists in code: +pts
-- mentioned but missing: −pts/2
-
-Checks: Docker→Dockerfile, tests→test dir, install→manifest,
-CLI→cmd/bin, API→api/routes, config→config files, CI→CI config.
-
-#### Maturity score (weight 30%)
-| Signal | Points |
-|--------|--------|
-| Stars ≥50k | +25 |
-| Stars ≥500 | +18 |
-| Stars ≥50 | +10 |
-| Stars ≥5 | +5 |
-| Last push ≤30d | +20 |
-| Last push ≤90d | +15 |
-| Last push ≤365d | +8 |
-| Last push ≤730d | +3 |
-| Forks ≥500 | +15 |
-| Forks ≥50 | +10 |
-| Forks ≥5 | +5 |
-| Releases ≥5 | +15 |
-| Releases ≥1 | +8 |
-| Contributors ≥20 | +15 |
-| Contributors ≥3 | +8 |
-| Archived | score × 0.3 |
-| Fork | −10 |
-
-**Interest score** = doc×0.2 + code×0.3 + coherence×0.2 + maturity×0.3
-
-### 4. Verdict
-
-Based on scores and direct inspection of the code and README:
-
-| Status | Criterion |
-|--------|----------|
-| `adopt` | High potential, mature, coherent docs. Worth adopting now. |
-| `partial` | Contains something concrete to port, but not the whole thing. |
-| `reject` | Abandoned, low quality, misleading docs, or irrelevant. |
-
-Identify:
-- **What To Reuse**: concrete items worth porting with context
-- **What To Avoid**: risks, tight coupling, bad practices
-- **Risks**: adoption risks
-- **Evidence**: specific files/snippets supporting the verdict
-
-### 5. Record in PROJECT_EVALUATIONS.md
-
-Append or update the entry in `/opt/references/PROJECT_EVALUATIONS.md`
-using this exact template:
+Using the data returned by the CLI, append or update the entry in
+`/opt/references/PROJECT_EVALUATIONS.md`:
 
 ```markdown
 ## owner/repo
@@ -134,7 +75,7 @@ using this exact template:
 
 #### What To Reuse
 
-- Concrete item with context
+- Concrete item with context (based on LLM rationale and evidence)
 
 #### What To Avoid
 
@@ -152,16 +93,24 @@ using this exact template:
 
 - Scores: interest=X doc=X code=X coherence=X maturity=X
 - Stars: X | Forks: X | Contributors: X | Releases: X
-- Language: X | License: X
+- Language: X | License: X | LLM: <provider>
 - Last push: YYYY-MM-DD
+- radar.db: `/opt/references/repo-radar/data/radar.db`
 ```
+
+**Classification mapping:**
+- `INTERESTING` → `adopt`
+- `INCORPORATE` → `partial`
+- `WATCH` → `partial` (with monitoring note)
+- `REDUNDANT` → `reject`
+- `DISCARD` → `reject`
 
 If the repo already exists in the file, **update** the existing entry
 instead of duplicating it.
 
 ## Rules
 
-- Be specific. Cite actual file paths found in the clone.
-- If the repo cannot be cloned (private, removed), use API metadata only.
+- SQLite is the primary source of truth — PROJECT_EVALUATIONS.md is a derived report.
+- Use the LLM rationale as the basis for What To Reuse / What To Avoid.
+- Cite actual file paths found in the clone for the Evidence section.
 - Always include numeric scores in Notes for traceability.
-- Clean up after recording: `rm -rf /tmp/radar-<repo-name>`
