@@ -50,25 +50,78 @@ def _parse_slug(url: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
-def get_repo_metadata(url: str, token: Optional[str] = None) -> Optional[dict]:
+def get_repo_metadata(url: str, token: Optional[str] = None, local_path: Optional[str] = None) -> Optional[dict]:
+    """Fetch repo metadata using a single GitHub API call.
+    Languages, last commit, and contributor count are enriched from the local clone when available.
+    """
     slug = _parse_slug(url)
     if not slug:
         return None
 
     api_url = f"{BASE_URL}/repos/{slug}"
-    repo = _get(api_url, token)
+    repo = _get(api_url, token)  # 1 API call only
     if not repo:
         return None
 
-    langs_raw = _get(f"{api_url}/languages", token) or {}
-    languages = ", ".join(langs_raw.keys()) if langs_raw else "unknown"
+    # Enrich from local clone when available — zero extra API calls
+    languages = "unknown"
+    last_commit_sha = ""
+    last_commit_date = ""
+    contributor_count = 0
+    release_count = 0
 
-    commits = _get(f"{api_url}/commits?per_page=1", token) or []
-    last_commit_sha = commits[0]["sha"] if commits else ""
-    last_commit_date = commits[0]["commit"]["author"]["date"] if commits else ""
+    if local_path:
+        import subprocess
+        from pathlib import Path
+        lp = Path(local_path)
+        if lp.is_dir():
+            # Languages: count files by extension
+            ext_map: dict[str, int] = {}
+            for f in lp.rglob("*"):
+                if f.is_file() and f.suffix and ".git" not in f.parts:
+                    ext_map[f.suffix] = ext_map.get(f.suffix, 0) + 1
+            lang_exts = {
+                ".py": "Python", ".js": "JavaScript", ".ts": "TypeScript",
+                ".go": "Go", ".rs": "Rust", ".java": "Java", ".cs": "C#",
+                ".rb": "Ruby", ".php": "PHP", ".cpp": "C++", ".c": "C",
+                ".ex": "Elixir", ".exs": "Elixir", ".kt": "Kotlin",
+                ".swift": "Swift", ".sh": "Shell", ".ps1": "PowerShell",
+            }
+            found_langs = sorted(
+                {lang_exts[ext] for ext, cnt in ext_map.items() if ext in lang_exts},
+                key=lambda l: -ext_map.get({v: k for k, v in lang_exts.items()}.get(l, ""), 0)
+            )
+            if found_langs:
+                languages = ", ".join(found_langs)
 
-    releases = _get(f"{api_url}/releases?per_page=5", token) or []
-    contribs = _get(f"{api_url}/contributors?per_page=30&anon=false", token) or []
+            # Last commit from git log
+            r = subprocess.run(
+                ["git", "-C", str(lp), "log", "-1", "--format=%H %aI"],
+                capture_output=True, text=True
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                parts = r.stdout.strip().split(" ", 1)
+                last_commit_sha = parts[0]
+                last_commit_date = parts[1] if len(parts) > 1 else ""
+
+            # Contributor count from git shortlog
+            r2 = subprocess.run(
+                ["git", "-C", str(lp), "shortlog", "-s", "HEAD"],
+                capture_output=True, text=True
+            )
+            if r2.returncode == 0:
+                contributor_count = len([l for l in r2.stdout.strip().splitlines() if l.strip()])
+
+            # Release count from tags
+            r3 = subprocess.run(
+                ["git", "-C", str(lp), "tag", "-l"],
+                capture_output=True, text=True
+            )
+            if r3.returncode == 0:
+                release_count = len([t for t in r3.stdout.strip().splitlines() if t.strip()])
+    else:
+        # Fallback: use what the main API endpoint provides (no extra calls)
+        languages = repo.get("language") or "unknown"
 
     return {
         "owner": repo["owner"]["login"],
@@ -88,8 +141,8 @@ def get_repo_metadata(url: str, token: Optional[str] = None) -> Optional[dict]:
         "pushed_at": repo.get("pushed_at", ""),
         "last_commit_sha": last_commit_sha,
         "last_commit_date": last_commit_date,
-        "release_count": len(releases),
-        "contributor_count": len(contribs),
+        "release_count": release_count,
+        "contributor_count": contributor_count,
         "has_wiki": repo.get("has_wiki", False),
         "has_pages": repo.get("has_pages", False),
         "archived": repo.get("archived", False),

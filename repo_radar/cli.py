@@ -16,8 +16,15 @@ console = Console()
 
 
 def _setup() -> tuple[Path, Path, Path]:
-    load_dotenv()
-    radar_home = Path(os.getenv("RADAR_HOME") or Path(__file__).parent.parent)
+    # Load .env from RADAR_HOME, the package root, or cwd — whichever exists first
+    pkg_root = Path(__file__).parent.parent
+    for candidate in [pkg_root / ".env", Path.cwd() / ".env"]:
+        if candidate.exists():
+            load_dotenv(candidate)
+            break
+    else:
+        load_dotenv()
+    radar_home = Path(os.getenv("RADAR_HOME") or pkg_root)
     data_dir = radar_home / "data"
     repos_dir = radar_home / "repos"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -45,17 +52,43 @@ def _clone_or_pull(clone_url: str, repo_name: str, repos_dir: Path, force: bool 
     return dest
 
 
+def _find_existing_local(repo_name: str, repos_dir: Path) -> Optional[Path]:
+    """Check if repo is already cloned locally — in repos_dir or in parent (e.g. /opt/references)."""
+    candidate = repos_dir / repo_name
+    if candidate.is_dir() and (candidate / ".git").is_dir():
+        return candidate
+    # Check one level up (e.g. /opt/references/<name>)
+    parent = repos_dir.parent
+    candidate2 = parent / repo_name
+    if candidate2.is_dir() and (candidate2 / ".git").is_dir():
+        return candidate2
+    return None
+
+
 def _run_analysis(url: str, repos_dir: Path, force: bool = False) -> Optional[dict]:
     from . import github, analysis, llm as llm_mod
 
     console.print(f"\n[cyan]🔍 Analysing[/cyan] {url}")
 
-    meta = github.get_repo_metadata(url)
+    # Check for existing local clone before API call (to pass as local_path)
+    import re
+    slug_match = re.search(r"github\.com[:/]([^/]+/[^/]+?)(?:\.git)?$", url)
+    repo_name_hint = slug_match.group(1).split("/")[1] if slug_match else None
+    existing_path = _find_existing_local(repo_name_hint, repos_dir) if repo_name_hint else None
+
+    # 1 API call only — enrich from local clone when available
+    meta = github.get_repo_metadata(url, local_path=str(existing_path) if existing_path else None)
     if not meta:
         console.print("[red]  ✗ Could not fetch metadata from GitHub.[/red]")
         return None
 
-    repo_path = _clone_or_pull(meta["clone_url"], meta["name"], repos_dir, force)
+    # Clone or pull — reuse existing local clone if already found
+    if existing_path and not force:
+        console.print(f"  🔄 Updating {meta['name']} (existing clone)...")
+        subprocess.run(["git", "-C", str(existing_path), "pull", "--quiet"], check=False)
+        repo_path = existing_path
+    else:
+        repo_path = _clone_or_pull(meta["clone_url"], meta["name"], repos_dir, force)
     if not repo_path:
         return None
 
